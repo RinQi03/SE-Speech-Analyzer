@@ -9,11 +9,31 @@ from dotenv import load_dotenv
 from flask import Flask, request, jsonify
 from pymongo import MongoClient
 from pymongo.errors import PyMongoError, ConnectionFailure, OperationFailure
-from ml_client import get_transcript
+from deepgram import (
+    DeepgramClient,
+    PrerecordedOptions,
+    FileSource,
+)
 
 
 # Load environment variables from .env file
 load_dotenv()
+
+AUDIO_FOLDER = "/app/uploaded_audio"
+
+# local mode
+if os.getenv("MODE") == "local":
+    # Look for audio files in the web-app's static directory
+    AUDIO_FOLDER = os.path.join(
+        os.path.dirname(os.path.dirname(__file__)),
+        "web-app",
+        "static",
+        "uploaded_audio",
+    )
+elif os.getenv("MODE") == "docker":
+    AUDIO_FOLDER = "/app/uploaded_audio"
+
+print(f"AUDIO_FOLDER: {AUDIO_FOLDER}")
 
 # Connect to MongoDB
 mongo_host = os.getenv(
@@ -92,6 +112,7 @@ def process_transcript_api():
     Returns:
         json: message and transcript
     """
+    print("Received transcript request")
     data = request.get_json()
     voice_data_rel_file_path = data.get("audio_file_path")
 
@@ -104,7 +125,7 @@ def process_transcript_api():
     filename = os.path.basename(voice_data_rel_file_path)
 
     # Use the shared volume path
-    file_path = os.path.join("/app/uploaded_audio", filename)
+    file_path = os.path.join(AUDIO_FOLDER, filename)
     print(f"Looking for file at: {file_path}")
 
     # Check if file exists
@@ -220,6 +241,45 @@ def trans_to_top_word(transcript):
     ]  # Filter out words that are 3 characters or less
     ranked = rank_by_freq_desc(filtered)
     return ranked
+
+
+def get_transcript(audio_file: str):
+    """
+    Async function to transcribe an audio file using the Deepgram API.
+
+    Args:
+        audio_file (str): The path to the audio file to transcribe.
+
+    Returns:
+        str: The transcript of the audio file.
+    """
+    try:
+        deepgram = DeepgramClient(api_key=os.getenv("DEEPGRAM_API_KEY"))
+
+        with open(audio_file, "rb") as file:
+            buffer_data = file.read()
+
+        payload: FileSource = {
+            "buffer": buffer_data,
+        }
+
+        options = PrerecordedOptions(
+            model="nova-3",
+            smart_format=True,
+        )
+
+        response = deepgram.listen.rest.v("1").transcribe_file(payload, options)
+        result = response.results.channels[0].alternatives[0]
+        return result.transcript
+
+    except (OSError, IOError) as e:
+        return f"File operation error: {e}"
+    except KeyError as e:
+        return f"API response format error: {e}"
+    except RuntimeError as e:
+        return f"runtime error: {e}"
+    except IndexError as e:
+        return f"index error: {e}"
 
 
 if __name__ == "__main__":
